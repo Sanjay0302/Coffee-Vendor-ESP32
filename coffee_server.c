@@ -1,3 +1,12 @@
+/*
+ * Download GTK 3 library : sudo apt-get install libgtk-3-dev
+ *
+ * gcc coffee_server.c -o coffee_server `pkg-config --cflags --libs gtk+-3.0`
+ * else use Makefile
+ * 1. `make` : to compile
+ * 2. `make clean` : execute this before executing make
+ */
+
 #include <gtk/gtk.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -6,9 +15,9 @@
 #include <unistd.h>
 
 #define PORT 8080
-#define ESP32_IP "192.168.1.100" // Replace with your ESP32's IP address
+#define ESP32_IP "192.168.1.100"
 #define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 600
+#define WINDOW_HEIGHT 400
 
 typedef struct
 {
@@ -26,7 +35,7 @@ typedef struct
     gboolean is_connected;
 } AppWidgets;
 
-// Function to send control signal to ESP32
+// send control signal to ESP32
 void send_control_signal(AppWidgets *app, const char *signal, int quantity)
 {
     char message[100];
@@ -45,7 +54,7 @@ void send_control_signal(AppWidgets *app, const char *signal, int quantity)
     }
 }
 
-// Callback for Coffee buttons
+// Coffee buttons callback
 void on_coffee_button_clicked(GtkWidget *widget, gpointer data)
 {
     AppWidgets *app = (AppWidgets *)data;
@@ -62,7 +71,6 @@ void on_coffee_button_clicked(GtkWidget *widget, gpointer data)
     }
 }
 
-// Callback for Connect/Disconnect button
 void on_connect_button_clicked(GtkWidget *widget, gpointer data)
 {
     AppWidgets *app = (AppWidgets *)data;
@@ -70,7 +78,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
 
     if (strcmp(button_label, "Connect") == 0)
     {
-        // Create UDP socket
+        // UDP socket
         app->sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (app->sock < 0)
         {
@@ -78,7 +86,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        // Configure ESP32 address
+        // ESP32 address
         memset(&app->esp32_addr, 0, sizeof(app->esp32_addr));
         app->esp32_addr.sin_family = AF_INET;
         app->esp32_addr.sin_port = htons(PORT);
@@ -103,22 +111,22 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
     }
 }
 
-// Initialize application
 void activate(GtkApplication *app, gpointer user_data)
 {
     AppWidgets *widgets = (AppWidgets *)user_data;
 
-    // Create main window
     widgets->window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(widgets->window), "Coffee Vending Server");
     gtk_window_set_default_size(GTK_WINDOW(widgets->window), WINDOW_WIDTH, WINDOW_HEIGHT);
     gtk_window_set_resizable(GTK_WINDOW(widgets->window), FALSE);
 
-    // Create grid for UI elements
+    gtk_grid_set_row_spacing(GTK_GRID(widgets->grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(widgets->grid), 10);
+
     widgets->grid = gtk_grid_new();
     gtk_container_add(GTK_CONTAINER(widgets->window), widgets->grid);
 
-    // Coffee type buttons
+    // beverage buttons
     const char *coffee_types[] = {
         "Espresso",
         "Cappuccino",
@@ -126,7 +134,6 @@ void activate(GtkApplication *app, gpointer user_data)
         "Americano",
         "Hot Water"};
 
-    // Create and place buttons
     for (int i = 0; i < G_N_ELEMENTS(coffee_types); i++)
     {
         widgets->beverage_buttons[i] = gtk_button_new_with_label(coffee_types[i]);
@@ -134,12 +141,11 @@ void activate(GtkApplication *app, gpointer user_data)
 
         // Place buttons in a grid
         gtk_grid_attach(GTK_GRID(widgets->grid), widgets->beverage_buttons[i],
-                        i % 3, // column
-                        i / 3, // row
+                        i % 1, // column
+                        i / 1, // row
                         1, 1); // width, height
     }
 
-    // Create quantity combo box
     widgets->quantity_combo = gtk_combo_box_text_new();
     for (int i = 1; i <= 10; i++)
     {
@@ -148,32 +154,35 @@ void activate(GtkApplication *app, gpointer user_data)
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(widgets->quantity_combo), quantity);
     }
     gtk_combo_box_set_active(GTK_COMBO_BOX(widgets->quantity_combo), 0);
-    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->quantity_combo, 0, 5, 3, 1);
+    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->quantity_combo, 0, 5, 1, 1);
 
-    // Create client IP entry
     widgets->client_ip_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(widgets->client_ip_entry), "Enter Client IP");
-    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->client_ip_entry, 0, 6, 3, 1);
+    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->client_ip_entry, 0, 6, 1, 1);
 
-    // Create connect/disconnect button
     widgets->connect_button = gtk_button_new_with_label("Connect");
     g_signal_connect(widgets->connect_button, "clicked", G_CALLBACK(on_connect_button_clicked), widgets);
-    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->connect_button, 0, 7, 3, 1);
+    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->connect_button, 0, 7, 1, 1);
 
-    // Create connection status label
     widgets->connection_status_label = gtk_label_new("Disconnected");
-    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->connection_status_label, 0, 8, 3, 1);
+    gtk_grid_attach(GTK_GRID(widgets->grid), widgets->connection_status_label, 0, 8, 1, 1);
 
-    // Create log view
     widgets->log_buffer = gtk_text_buffer_new(NULL);
     widgets->log_view = gtk_text_view_new_with_buffer(widgets->log_buffer);
     gtk_text_view_set_editable(GTK_TEXT_VIEW(widgets->log_view), FALSE);
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(widgets->log_view), FALSE);
-    GtkWidget *log_scrolled_window = gtk_scrolled_window_new(NULL, NULL);
-    gtk_container_add(GTK_CONTAINER(log_scrolled_window), widgets->log_view);
-    gtk_grid_attach(GTK_GRID(widgets->grid), log_scrolled_window, 3, 0, 5, 9);
 
-    // Show all widgets
+    GtkWidget *log_scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+    gtk_widget_set_size_request(log_scrolled_window, 300, 400); // Set minimum size
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scrolled_window),
+                                   GTK_POLICY_AUTOMATIC,
+                                   GTK_POLICY_AUTOMATIC);
+
+    gtk_container_add(GTK_CONTAINER(log_scrolled_window), widgets->log_view);
+    gtk_widget_set_hexpand(log_scrolled_window, TRUE);
+    gtk_widget_set_vexpand(log_scrolled_window, TRUE);
+    gtk_grid_attach(GTK_GRID(widgets->grid), log_scrolled_window, 2, 0, 1, 9);
+
     gtk_widget_show_all(widgets->window);
 }
 
@@ -182,15 +191,12 @@ int main(int argc, char **argv)
     AppWidgets app_widgets = {0};
     app_widgets.is_connected = FALSE;
 
-    // Create GTK application
     GtkApplication *app = gtk_application_new("org.example.coffee_server",
                                               G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(activate), &app_widgets);
 
-    // Run the application
     int status = g_application_run(G_APPLICATION(app), argc, argv);
 
-    // Destroy application
     g_object_unref(app);
 
     return status;
