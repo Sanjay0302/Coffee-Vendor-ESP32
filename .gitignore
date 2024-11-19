@@ -1,0 +1,5 @@
+coffee_server
+./a.out
+*.out
+*.o
+.vscode
