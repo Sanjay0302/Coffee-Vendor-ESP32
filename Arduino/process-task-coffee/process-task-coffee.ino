@@ -12,28 +12,27 @@ const char *password = "123456789";
 WiFiUDP udp;
 const int localPort = 8080;
 
-// Change packetBuffer to a char array
 char packetBuffer[255];
 
-// Define a queue to hold received messages
 QueueHandle_t messageQueue;
 
-// Structure to hold the message data
-struct Message {
+struct Message
+{
     String Beverage;
     int Quantity;
 };
 
-
 using namespace std;
 
-const int timePerBeverage = 10; // Time in seconds to prepare one Beverage
+const int timePerBeverage = 10;
 
-void setup() {
+void setup()
+{
     Serial.begin(115200);
 
     WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
+    while (WiFi.status() != WL_CONNECTED)
+    {
         delay(500);
         Serial.print(".");
     }
@@ -52,11 +51,14 @@ void setup() {
     xTaskCreate(taskFunction, "TaskName", 2048, NULL, 1, NULL);
 }
 
-void loop() {
+void loop()
+{
     int packetSize = udp.parsePacket();
-    if (packetSize) {
-        int len = udp.read(packetBuffer, 255); 
-        if (len > 0) {
+    if (packetSize)
+    {
+        int len = udp.read(packetBuffer, 255);
+        if (len > 0)
+        {
             packetBuffer[len] = 0;
             Serial.println("====================================");
             Serial.println("Order Details : ");
@@ -65,38 +67,42 @@ void loop() {
 
             Message msg;
 
-            stringstream ss(packetBuffer); // Use packetBuffer directly
+            stringstream ss(packetBuffer);
             string part1, part2;
 
-            if (getline(ss, part1, ',') && getline(ss, part2, ',')) {
+            if (getline(ss, part1, ',') && getline(ss, part2, ','))
+            {
                 msg.Beverage = part1.c_str();
                 msg.Quantity = stoi(part2);
-            } else {
+            }
+            else
+            {
                 Serial.println("Failed to split the message.");
-                return; 
+                return;
             }
 
-            // Send to queue and check if successful
-            if (xQueueSend(messageQueue, &msg, portMAX_DELAY) != pdTRUE) {
+            if (xQueueSend(messageQueue, &msg, portMAX_DELAY) != pdTRUE)
+            {
                 Serial.println("Failed to send message to queue.");
             }
         }
     }
 }
 
-void taskFunction(void *pvParameters) {
-    while (true) {
+void taskFunction(void *pvParameters)
+{
+    while (true)
+    {
         Message msg;
-        // Wait for a message to arrive in the queue
-        if (xQueueReceive(messageQueue, &msg, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(messageQueue, &msg, portMAX_DELAY) == pdTRUE)
+        {
             Serial.println("====================================");
             Serial.println("Task is processing the message:");
             Serial.print("Beverage : ");
             Serial.println(msg.Beverage.c_str());
             Serial.print("Quantity : ");
             Serial.println(msg.Quantity);
-            vTaskDelay(pdMS_TO_TICKS(msg.Quantity * timePerBeverage * 1000)); 
-
+            vTaskDelay(pdMS_TO_TICKS(msg.Quantity * timePerBeverage * 1000));
         }
     }
 }

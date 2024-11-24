@@ -23,6 +23,8 @@
 #define HANDSHAKE_ACK "COFFEE_ACK"
 #define HANDSHAKE_TIMEOUT_MS 3000
 #define RECEIVE_BUFFER_SIZE 255
+#define ORDER_ACK "ORDER_ACK"
+#define ORDER_TIMEOUT_MS 3000
 
 typedef struct
 {
@@ -35,6 +37,7 @@ typedef struct
     GtkWidget *log_view;
     GtkTextBuffer *log_buffer;
     GtkWidget *beverage_buttons[5];
+    GtkWidget *clear_button;
     int sock;
     struct sockaddr_in esp32_addr;
     gboolean is_connected;
@@ -42,30 +45,64 @@ typedef struct
     guint receive_check_id;
     char receive_buffer[RECEIVE_BUFFER_SIZE];
     gboolean handshake_in_progress;
+    guint order_timeout_id;
+    gboolean waiting_for_order_ack;
+    char pending_order[100];
 } AppWidgets;
 
+void clear_log_clicked(GtkWidget *widget, gpointer data)
+{
+    AppWidgets *app = (AppWidgets *)data;
+    gtk_text_buffer_set_text(app->log_buffer, "", -1);
+}
 void append_to_log(AppWidgets *app, const char *text)
 {
     GtkTextIter iter;
 
-    // Insert text at the end of the buffer
+    // insert text at the end of the buffer
     gtk_text_buffer_get_end_iter(app->log_buffer, &iter);
     gtk_text_buffer_insert(app->log_buffer, &iter, text, -1);
 
-    // Scroll to the end
+    // scroll to the end
     gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(app->log_view), &iter, 0.0, FALSE, 0.0, 0.0);
 }
 
-// Button access rights until connection complete
 void set_controls_sensitivity(AppWidgets *app, gboolean sensitive)
 {
-    // Set sensitivity for all beverage buttons
+    // sensitivity for all beverage buttons
     for (int i = 0; i < 5; i++)
     {
         gtk_widget_set_sensitive(app->beverage_buttons[i], sensitive);
     }
-    // Set sensitivity for quantity combo box
+    // sensitivity for quantity combo box
     gtk_widget_set_sensitive(app->quantity_combo, sensitive);
+}
+
+gboolean order_timeout(gpointer data)
+{
+    AppWidgets *app = (AppWidgets *)data;
+
+    if (app->waiting_for_order_ack)
+    {
+        app->waiting_for_order_ack = FALSE;
+        app->is_connected = FALSE;
+
+        gtk_button_set_label(GTK_BUTTON(app->connect_button), "Connect");
+        gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Disconnected");
+        append_to_log(app, "Order acknowledgment timeout - Client disconnected\n");
+        append_to_log(app, "Connect again\n");
+        set_controls_sensitivity(app, FALSE);
+
+        if (app->receive_check_id)
+        {
+            g_source_remove(app->receive_check_id);
+            app->receive_check_id = 0;
+        }
+        close(app->sock);
+    }
+
+    app->order_timeout_id = 0;
+    return G_SOURCE_REMOVE;
 }
 
 void set_socket_nonblocking(int sock)
@@ -74,9 +111,15 @@ void set_socket_nonblocking(int sock)
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// Send control signal to ESP32
+// send control signal to ESP32
 void send_control_signal(AppWidgets *app, const char *signal, int quantity)
 {
+    if (!app->is_connected)
+    {
+        append_to_log(app, "Not connected to client. Unable to send signal.\n");
+        return;
+    }
+
     char message[100];
     snprintf(message, sizeof(message), "%s,%d", signal, quantity);
 
@@ -84,13 +127,20 @@ void send_control_signal(AppWidgets *app, const char *signal, int quantity)
                (struct sockaddr *)&app->esp32_addr, sizeof(app->esp32_addr)) < 0)
     {
         append_to_log(app, "Failed to send signal\n");
+        return;
     }
-    else
-    {
-        char log_message[150];
-        snprintf(log_message, sizeof(log_message), "Sent signal: %s\n", message);
-        append_to_log(app, log_message);
-    }
+
+    // store pending order and start timeout
+    strncpy(app->pending_order, message, sizeof(app->pending_order) - 1);
+    app->waiting_for_order_ack = TRUE;
+    gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Waiting for ACK...");
+
+    // start order timeout timer
+    app->order_timeout_id = g_timeout_add(ORDER_TIMEOUT_MS, order_timeout, app);
+
+    char log_message[150];
+    snprintf(log_message, sizeof(log_message), "Sent signal: %s\n", message);
+    append_to_log(app, log_message);
 }
 
 gboolean check_udp_messages(gpointer data)
@@ -108,7 +158,7 @@ gboolean check_udp_messages(gpointer data)
 
         if (app->handshake_in_progress && strcmp(app->receive_buffer, HANDSHAKE_ACK) == 0)
         {
-            // Handshake completed successfully
+            // handshake completed success
             app->handshake_in_progress = FALSE;
             if (app->handshake_timeout_id)
             {
@@ -122,11 +172,25 @@ gboolean check_udp_messages(gpointer data)
             set_controls_sensitivity(app, TRUE);
             append_to_log(app, "Connection established!\n");
         }
-        ////
-        char log_message[300];
-        snprintf(log_message, sizeof(log_message), "Received: %s\n", app->receive_buffer);
-        append_to_log(app, log_message);
-        ////
+        else if (app->waiting_for_order_ack && strcmp(app->receive_buffer, ORDER_ACK) == 0)
+        {
+            // order acknowledged
+            app->waiting_for_order_ack = FALSE;
+            if (app->order_timeout_id)
+            {
+                g_source_remove(app->order_timeout_id);
+                app->order_timeout_id = 0;
+            }
+            gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connected");
+            append_to_log(app, "Order acknowledged by client\n");
+        }
+        else
+        {
+            // regular message received
+            char log_message[300];
+            snprintf(log_message, sizeof(log_message), "Received: %s\n", app->receive_buffer);
+            append_to_log(app, log_message);
+        }
     }
 
     return G_SOURCE_CONTINUE;
@@ -177,7 +241,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
     {
         set_controls_sensitivity(app, FALSE);
 
-        // Create UDP socket
+        // create UDP socket
         app->sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (app->sock < 0)
         {
@@ -185,10 +249,10 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        // Make socket non-blocking
+        // make socket non-blocking
         set_socket_nonblocking(app->sock);
 
-        // Set up ESP32 address
+        // set up ESP32 address
         memset(&app->esp32_addr, 0, sizeof(app->esp32_addr));
         app->esp32_addr.sin_family = AF_INET;
         app->esp32_addr.sin_port = htons(PORT);
@@ -200,11 +264,11 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        // Start handshake process
+        // start handshake process
         app->handshake_in_progress = TRUE;
         gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connecting...");
 
-        // Send handshake request
+        // send handshake request
         if (sendto(app->sock, HANDSHAKE_REQUEST, strlen(HANDSHAKE_REQUEST), 0,
                    (struct sockaddr *)&app->esp32_addr, sizeof(app->esp32_addr)) < 0)
         {
@@ -213,15 +277,15 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        // Start timeout timer
+        // start timeout timer
         app->handshake_timeout_id = g_timeout_add(HANDSHAKE_TIMEOUT_MS, handshake_timeout, app);
 
-        // Start checking for responses
+        // start checking for responses
         app->receive_check_id = g_timeout_add(100, check_udp_messages, app);
     }
     else
     {
-        // Disconnect
+        // disconnect
         if (app->receive_check_id)
         {
             g_source_remove(app->receive_check_id);
@@ -257,7 +321,7 @@ void activate(GtkApplication *app, gpointer user_data)
     gtk_grid_set_column_spacing(GTK_GRID(widgets->grid), 10);
     gtk_container_add(GTK_CONTAINER(widgets->window), widgets->grid);
 
-    // Beverage buttons
+    // beverage buttons
     const char *coffee_types[] = {
         "Espresso",
         "Cappuccino",
@@ -294,37 +358,46 @@ void activate(GtkApplication *app, gpointer user_data)
     widgets->connection_status_label = gtk_label_new("Disconnected");
     gtk_grid_attach(GTK_GRID(widgets->grid), widgets->connection_status_label, 0, 8, 1, 1);
 
+    // create log section container
+    GtkWidget *log_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_hexpand(log_container, TRUE);
+    gtk_widget_set_vexpand(log_container, TRUE);
+
+    // create text view and buffer
     widgets->log_buffer = gtk_text_buffer_new(NULL);
     widgets->log_view = gtk_text_view_new_with_buffer(widgets->log_buffer);
     gtk_text_view_set_editable(GTK_TEXT_VIEW(widgets->log_view), FALSE);
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(widgets->log_view), FALSE);
-    ////
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(widgets->log_view), GTK_WRAP_WORD_CHAR);
-    ////
 
-    GtkWidget *log_scrolled_window = gtk_scrolled_window_new(NULL, NULL);
-    gtk_widget_set_size_request(log_scrolled_window, 300, 400);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scrolled_window),
+    // create scrolled window for log view
+    GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window),
                                    GTK_POLICY_AUTOMATIC,
                                    GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled_window, 300, 350); // Reduced height to make room for button
+    gtk_container_add(GTK_CONTAINER(scrolled_window), widgets->log_view);
 
-    // Add some padding around the text view
-    GtkWidget *log_padding_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_margin_start(log_padding_box, 5);
-    gtk_widget_set_margin_end(log_padding_box, 5);
-    gtk_widget_set_margin_top(log_padding_box, 5);
-    gtk_widget_set_margin_bottom(log_padding_box, 5);
+    // create clear button
+    widgets->clear_button = gtk_button_new_with_label("Clear Log");
+    g_signal_connect(widgets->clear_button, "clicked", G_CALLBACK(clear_log_clicked), widgets);
+    gtk_widget_set_margin_start(widgets->clear_button, 5);  // Add left margin
+    gtk_widget_set_margin_bottom(widgets->clear_button, 5); // Add bottom margin
 
-    gtk_container_add(GTK_CONTAINER(log_scrolled_window), widgets->log_view);
-    gtk_container_add(GTK_CONTAINER(log_scrolled_window), log_padding_box);
+    // add scrolled window and clear button to log container
+    gtk_box_pack_start(GTK_BOX(log_container), scrolled_window, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(log_container), widgets->clear_button, FALSE, FALSE, 0);
 
-    gtk_widget_set_hexpand(log_scrolled_window, TRUE);
-    gtk_widget_set_vexpand(log_scrolled_window, TRUE);
-    gtk_grid_attach(GTK_GRID(widgets->grid), log_scrolled_window, 2, 0, 1, 9);
+    // add log container to grid
+    gtk_grid_attach(GTK_GRID(widgets->grid), log_container, 2, 0, 1, 9);
+
+    widgets->order_timeout_id = 0;
+    widgets->waiting_for_order_ack = FALSE;
+    memset(widgets->pending_order, 0, sizeof(widgets->pending_order));
+
     set_controls_sensitivity(widgets, FALSE);
     gtk_widget_show_all(widgets->window);
 }
-
 int main(int argc, char **argv)
 {
     AppWidgets app_widgets = {0};
