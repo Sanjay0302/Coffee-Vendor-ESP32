@@ -13,11 +13,16 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #define PORT 8080
-#define ESP32_IP "192.168.1.100"
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 400
+#define HANDSHAKE_REQUEST "COFFEE_HANDSHAKE"
+#define HANDSHAKE_ACK "COFFEE_ACK"
+#define HANDSHAKE_TIMEOUT_MS 3000
+#define RECEIVE_BUFFER_SIZE 255
 
 typedef struct
 {
@@ -33,9 +38,31 @@ typedef struct
     int sock;
     struct sockaddr_in esp32_addr;
     gboolean is_connected;
+    guint handshake_timeout_id;
+    guint receive_check_id;
+    char receive_buffer[RECEIVE_BUFFER_SIZE];
+    gboolean handshake_in_progress;
 } AppWidgets;
 
-// send control signal to ESP32
+// Button access rights until connection complete
+void set_controls_sensitivity(AppWidgets *app, gboolean sensitive)
+{
+    // Set sensitivity for all beverage buttons
+    for (int i = 0; i < 5; i++)
+    {
+        gtk_widget_set_sensitive(app->beverage_buttons[i], sensitive);
+    }
+    // Set sensitivity for quantity combo box
+    gtk_widget_set_sensitive(app->quantity_combo, sensitive);
+}
+
+void set_socket_nonblocking(int sock)
+{
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+}
+
+// Send control signal to ESP32
 void send_control_signal(AppWidgets *app, const char *signal, int quantity)
 {
     char message[100];
@@ -54,7 +81,60 @@ void send_control_signal(AppWidgets *app, const char *signal, int quantity)
     }
 }
 
-// Coffee buttons callback
+gboolean check_udp_messages(gpointer data)
+{
+    AppWidgets *app = (AppWidgets *)data;
+    struct sockaddr_in sender_addr;
+    socklen_t sender_addr_len = sizeof(sender_addr);
+
+    int received = recvfrom(app->sock, app->receive_buffer, RECEIVE_BUFFER_SIZE - 1, 0,
+                            (struct sockaddr *)&sender_addr, &sender_addr_len);
+
+    if (received > 0)
+    {
+        app->receive_buffer[received] = '\0';
+
+        if (app->handshake_in_progress && strcmp(app->receive_buffer, HANDSHAKE_ACK) == 0)
+        {
+            // Handshake completed successfully
+            app->handshake_in_progress = FALSE;
+            if (app->handshake_timeout_id)
+            {
+                g_source_remove(app->handshake_timeout_id);
+                app->handshake_timeout_id = 0;
+            }
+
+            gtk_button_set_label(GTK_BUTTON(app->connect_button), "Disconnect");
+            gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connected");
+            app->is_connected = TRUE;
+            set_controls_sensitivity(app, TRUE);
+            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Connection established!\n", -1);
+        }
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+gboolean handshake_timeout(gpointer data)
+{
+    AppWidgets *app = (AppWidgets *)data;
+
+    if (app->handshake_in_progress)
+    {
+        app->handshake_in_progress = FALSE;
+        app->is_connected = FALSE;
+        close(app->sock);
+
+        gtk_button_set_label(GTK_BUTTON(app->connect_button), "Connect");
+        gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Disconnected");
+        gtk_text_buffer_insert_at_cursor(app->log_buffer, "Handshake timeout - no response from client\n", -1);
+        set_controls_sensitivity(app, FALSE);
+    }
+
+    app->handshake_timeout_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
 void on_coffee_button_clicked(GtkWidget *widget, gpointer data)
 {
     AppWidgets *app = (AppWidgets *)data;
@@ -78,7 +158,9 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
 
     if (strcmp(button_label, "Connect") == 0)
     {
-        // UDP socket
+        set_controls_sensitivity(app, FALSE);
+
+        // Create UDP socket
         app->sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (app->sock < 0)
         {
@@ -86,7 +168,10 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        // ESP32 address
+        // Make socket non-blocking
+        set_socket_nonblocking(app->sock);
+
+        // Set up ESP32 address
         memset(&app->esp32_addr, 0, sizeof(app->esp32_addr));
         app->esp32_addr.sin_family = AF_INET;
         app->esp32_addr.sin_port = htons(PORT);
@@ -98,16 +183,46 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
             return;
         }
 
-        gtk_button_set_label(GTK_BUTTON(widget), "Disconnect");
-        gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connected");
-        app->is_connected = TRUE;
+        // Start handshake process
+        app->handshake_in_progress = TRUE;
+        gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connecting...");
+
+        // Send handshake request
+        if (sendto(app->sock, HANDSHAKE_REQUEST, strlen(HANDSHAKE_REQUEST), 0,
+                   (struct sockaddr *)&app->esp32_addr, sizeof(app->esp32_addr)) < 0)
+        {
+            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Failed to send handshake request\n", -1);
+            close(app->sock);
+            return;
+        }
+
+        // Start timeout timer
+        app->handshake_timeout_id = g_timeout_add(HANDSHAKE_TIMEOUT_MS, handshake_timeout, app);
+
+        // Start checking for responses
+        app->receive_check_id = g_timeout_add(100, check_udp_messages, app);
     }
     else
     {
+        // Disconnect
+        if (app->receive_check_id)
+        {
+            g_source_remove(app->receive_check_id);
+            app->receive_check_id = 0;
+        }
+        if (app->handshake_timeout_id)
+        {
+            g_source_remove(app->handshake_timeout_id);
+            app->handshake_timeout_id = 0;
+        }
+
         close(app->sock);
         gtk_button_set_label(GTK_BUTTON(widget), "Connect");
         gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Disconnected");
         app->is_connected = FALSE;
+        app->handshake_in_progress = FALSE;
+
+        set_controls_sensitivity(app, FALSE);
     }
 }
 
@@ -120,13 +235,12 @@ void activate(GtkApplication *app, gpointer user_data)
     gtk_window_set_default_size(GTK_WINDOW(widgets->window), WINDOW_WIDTH, WINDOW_HEIGHT);
     gtk_window_set_resizable(GTK_WINDOW(widgets->window), FALSE);
 
+    widgets->grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(widgets->grid), 5);
     gtk_grid_set_column_spacing(GTK_GRID(widgets->grid), 10);
-
-    widgets->grid = gtk_grid_new();
     gtk_container_add(GTK_CONTAINER(widgets->window), widgets->grid);
 
-    // beverage buttons
+    // Beverage buttons
     const char *coffee_types[] = {
         "Espresso",
         "Cappuccino",
@@ -138,12 +252,8 @@ void activate(GtkApplication *app, gpointer user_data)
     {
         widgets->beverage_buttons[i] = gtk_button_new_with_label(coffee_types[i]);
         g_signal_connect(widgets->beverage_buttons[i], "clicked", G_CALLBACK(on_coffee_button_clicked), widgets);
-
-        // Place buttons in a grid
         gtk_grid_attach(GTK_GRID(widgets->grid), widgets->beverage_buttons[i],
-                        i % 1, // column
-                        i / 1, // row
-                        1, 1); // width, height
+                        i % 1, i / 1, 1, 1);
     }
 
     widgets->quantity_combo = gtk_combo_box_text_new();
@@ -173,7 +283,7 @@ void activate(GtkApplication *app, gpointer user_data)
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(widgets->log_view), FALSE);
 
     GtkWidget *log_scrolled_window = gtk_scrolled_window_new(NULL, NULL);
-    gtk_widget_set_size_request(log_scrolled_window, 300, 400); // Set minimum size
+    gtk_widget_set_size_request(log_scrolled_window, 300, 400);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scrolled_window),
                                    GTK_POLICY_AUTOMATIC,
                                    GTK_POLICY_AUTOMATIC);
@@ -182,7 +292,7 @@ void activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_hexpand(log_scrolled_window, TRUE);
     gtk_widget_set_vexpand(log_scrolled_window, TRUE);
     gtk_grid_attach(GTK_GRID(widgets->grid), log_scrolled_window, 2, 0, 1, 9);
-
+    set_controls_sensitivity(widgets, FALSE);
     gtk_widget_show_all(widgets->window);
 }
 
@@ -190,6 +300,9 @@ int main(int argc, char **argv)
 {
     AppWidgets app_widgets = {0};
     app_widgets.is_connected = FALSE;
+    app_widgets.handshake_in_progress = FALSE;
+    app_widgets.handshake_timeout_id = 0;
+    app_widgets.receive_check_id = 0;
 
     GtkApplication *app = gtk_application_new("org.example.coffee_server",
                                               G_APPLICATION_DEFAULT_FLAGS);
