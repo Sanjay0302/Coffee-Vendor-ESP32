@@ -44,6 +44,18 @@ typedef struct
     gboolean handshake_in_progress;
 } AppWidgets;
 
+void append_to_log(AppWidgets *app, const char *text)
+{
+    GtkTextIter iter;
+
+    // Insert text at the end of the buffer
+    gtk_text_buffer_get_end_iter(app->log_buffer, &iter);
+    gtk_text_buffer_insert(app->log_buffer, &iter, text, -1);
+
+    // Scroll to the end
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(app->log_view), &iter, 0.0, FALSE, 0.0, 0.0);
+}
+
 // Button access rights until connection complete
 void set_controls_sensitivity(AppWidgets *app, gboolean sensitive)
 {
@@ -71,13 +83,13 @@ void send_control_signal(AppWidgets *app, const char *signal, int quantity)
     if (sendto(app->sock, message, strlen(message), 0,
                (struct sockaddr *)&app->esp32_addr, sizeof(app->esp32_addr)) < 0)
     {
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, "Failed to send signal\n", -1);
+        append_to_log(app, "Failed to send signal\n");
     }
     else
     {
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, "Sent signal: ", -1);
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, message, -1);
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, "\n", -1);
+        char log_message[150];
+        snprintf(log_message, sizeof(log_message), "Sent signal: %s\n", message);
+        append_to_log(app, log_message);
     }
 }
 
@@ -108,8 +120,13 @@ gboolean check_udp_messages(gpointer data)
             gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Connected");
             app->is_connected = TRUE;
             set_controls_sensitivity(app, TRUE);
-            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Connection established!\n", -1);
+            append_to_log(app, "Connection established!\n");
         }
+        ////
+        char log_message[300];
+        snprintf(log_message, sizeof(log_message), "Received: %s\n", app->receive_buffer);
+        append_to_log(app, log_message);
+        ////
     }
 
     return G_SOURCE_CONTINUE;
@@ -127,7 +144,7 @@ gboolean handshake_timeout(gpointer data)
 
         gtk_button_set_label(GTK_BUTTON(app->connect_button), "Connect");
         gtk_label_set_text(GTK_LABEL(app->connection_status_label), "Disconnected");
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, "Handshake timeout - no response from client\n", -1);
+        append_to_log(app, "Handshake timeout - no response from client\n");
         set_controls_sensitivity(app, FALSE);
     }
 
@@ -147,7 +164,7 @@ void on_coffee_button_clicked(GtkWidget *widget, gpointer data)
     }
     else
     {
-        gtk_text_buffer_insert_at_cursor(app->log_buffer, "Not connected to client. Unable to send signal.\n", -1);
+        append_to_log(app, "Not connected to client. Unable to send signal.\n");
     }
 }
 
@@ -164,7 +181,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
         app->sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (app->sock < 0)
         {
-            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Socket creation error\n", -1);
+            append_to_log(app, "Socket creation error\n");
             return;
         }
 
@@ -178,7 +195,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
         const char *client_ip = gtk_entry_get_text(GTK_ENTRY(app->client_ip_entry));
         if (inet_pton(AF_INET, client_ip, &app->esp32_addr.sin_addr) <= 0)
         {
-            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Invalid IP address\n", -1);
+            append_to_log(app, "Invalid IP address\n");
             close(app->sock);
             return;
         }
@@ -191,7 +208,7 @@ void on_connect_button_clicked(GtkWidget *widget, gpointer data)
         if (sendto(app->sock, HANDSHAKE_REQUEST, strlen(HANDSHAKE_REQUEST), 0,
                    (struct sockaddr *)&app->esp32_addr, sizeof(app->esp32_addr)) < 0)
         {
-            gtk_text_buffer_insert_at_cursor(app->log_buffer, "Failed to send handshake request\n", -1);
+            append_to_log(app, "Failed to send handshake request\n");
             close(app->sock);
             return;
         }
@@ -281,6 +298,9 @@ void activate(GtkApplication *app, gpointer user_data)
     widgets->log_view = gtk_text_view_new_with_buffer(widgets->log_buffer);
     gtk_text_view_set_editable(GTK_TEXT_VIEW(widgets->log_view), FALSE);
     gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(widgets->log_view), FALSE);
+    ////
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(widgets->log_view), GTK_WRAP_WORD_CHAR);
+    ////
 
     GtkWidget *log_scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_size_request(log_scrolled_window, 300, 400);
@@ -288,7 +308,16 @@ void activate(GtkApplication *app, gpointer user_data)
                                    GTK_POLICY_AUTOMATIC,
                                    GTK_POLICY_AUTOMATIC);
 
+    // Add some padding around the text view
+    GtkWidget *log_padding_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_start(log_padding_box, 5);
+    gtk_widget_set_margin_end(log_padding_box, 5);
+    gtk_widget_set_margin_top(log_padding_box, 5);
+    gtk_widget_set_margin_bottom(log_padding_box, 5);
+
     gtk_container_add(GTK_CONTAINER(log_scrolled_window), widgets->log_view);
+    gtk_container_add(GTK_CONTAINER(log_scrolled_window), log_padding_box);
+
     gtk_widget_set_hexpand(log_scrolled_window, TRUE);
     gtk_widget_set_vexpand(log_scrolled_window, TRUE);
     gtk_grid_attach(GTK_GRID(widgets->grid), log_scrolled_window, 2, 0, 1, 9);
